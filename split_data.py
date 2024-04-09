@@ -12,14 +12,22 @@ def post_process(data_item):
     return data_item+"\n"
 
 
+def get_files(directory, extension):
+    json_files = []
+    for filename in os.listdir(directory):
+        if filename.endswith(extension) and os.path.isfile(os.path.join(directory, filename)):
+            json_files.append(os.path.abspath(os.path.join(directory, filename)))
+    return json_files
+
+
 Pipeline = JsonDataReader.partial(map_func = lambda x: x.strip())   |          \
            DataSplitter.partial(output_dir = DATA_PATH,
                                 post_processor=post_process,
                                 extension = ".txt")
 
-path = ["./data/part-202101281a.json"]
+files = get_files("/root/autodl-fs/WuDaoCorpus2.0_base_200G", ".json")
 ret = Pipeline(
-    file_path = path,
+    file_path = files,
     json_eval_path = "[:].content",
-    split_config = [("train", 0.05), ("valid", 0.05), ("test", 0.9)]
+    split_config = [("train", 0.98), ("valid", 0.02)]
 )
