@@ -20,6 +20,7 @@ def set_seed(seed):
 
 class Trainer:
     def __init__(self,
+                 model_name,
                  train_config,
                  tokenizer,
                  model,
@@ -29,6 +30,7 @@ class Trainer:
                  project_dir,
                  scheduler,
                  trainer_callback_class) -> None:
+        self.model_name = model_name
         self.train_config = train_config
         self.tokenizer = tokenizer
         self.model = model
@@ -39,14 +41,22 @@ class Trainer:
         self.scheduler = scheduler
         self.trainer_callback = trainer_callback_class(self)
         self.accelerator = None
+        self.training_params = {
+            "cur_epoch": 0
+        }
+        current_datetime = datetime.datetime.now()
+        logger_filename = "chat-trainer-{}".format(current_datetime)
+        self.formatted_datetime = current_datetime.strftime("%Y%m%d%H%M%S")
         self.logger = Logger('chat_trainer', std_out=True, project_dir=project_dir,
-                             save2file=True, file_name=None)
+                             save2file=True, file_name=logger_filename)
 
         self.latest_checkpoints = deque()
         signal.signal(signal.SIGINT, self.process_exit_handler)
         set_seed(train_config.seed)
 
     def process_exit_handler(self, signal_received, frame):
+        if not os.path.exists(self.train_config.train_state_dir):
+            os.makedirs(self.train_config.train_state_dir)
         if self.accelerator and self.model:
             self.accelerator.wait_for_everyone()
             self.accelerator.save_state(
@@ -62,14 +72,15 @@ class Trainer:
         if self.model and self.accelerator:
             self.accelerator.wait_for_everyone()
             if self.accelerator.is_main_process:
-                current_datetime = datetime.datetime.now()
                 unwrap_model = self.accelerator.unwrap_model(self.model)
                 model_dict = self.accelerator.get_state_dict(unwrap_model)
-                formatted_datetime = current_datetime.strftime("%Y%m%d%H%M%S")
-                model_save_path = os.path.join(self.train_config.model_save_path, \
-                                  "{}_{}.ckpt".format(suffix, formatted_datetime))
-                if not os.path.exists(self.train_config.model_save_path):
-                    os.makedirs(self.train_config.model_save_path)
+                model_save_path_with_date = os.path.join(
+                    self.train_config.model_save_path,
+                    self.formatted_datetime)
+                model_save_path = os.path.join(model_save_path_with_date,
+                                  "{}.ckpt".format(suffix))
+                if not os.path.exists(model_save_path_with_date):
+                    os.makedirs(model_save_path_with_date)
                 self.delete_early_checkpoint()
                 torch.save(model_dict, model_save_path)
                 self.latest_checkpoints.append(model_save_path)
@@ -102,7 +113,7 @@ class Trainer:
             gradient_accumulation_steps=self.train_config.gradient_accumulation_steps,
             project_dir=self.train_config.train_state_dir
         )
-
+        self.accelerator.register_for_checkpointing(self.scheduler)
         device = self.accelerator.device
         self.log("using device {}, device num is {}".format(str(device), self.accelerator.num_processes), save_to_file=True)
         train_steps_per_epoch = int(np.ceil(len(self.train_dataset) // self.get_total_batch_size()))
@@ -122,7 +133,6 @@ class Trainer:
             self.log("Resume model state dict from checkpoint ...")
         if resume:
             self.accelerator.load_state(input_dir=self.train_config.train_state_dir)
-            self.accelerator.register_for_checkpointing(self.scheduler)
         # --------------------------------------------------------------------------------
             
 
@@ -140,7 +150,7 @@ class Trainer:
         # --------------------------------------------------------------------------------
 
         # ------------------------------train---------------------------------------------
-        for epoch in range(self.train_config.num_train_epoches):
+        for epoch in range(self.training_params["cur_epoch"], self.train_config.num_train_epoches):
             # ------------------------------epoch_begin-----------------------------------
             self.trainer_callback.on_epoch_begin(epoch, epoch_loss_list, best_epoch, best_criterion_score)
             # ----------------------------------------------------------------------------
@@ -168,7 +178,7 @@ class Trainer:
                     # ------------------------------save_model-----------------------------------
                     self.trainer_callback.on_save_model()
                     # ---------------------------------------------------------------------------
-                    self.save_model("epoch_{}_{}_lastest".format(epoch, step + 1))
+                    self.save_model("{}_epoch_{}_{}_lastest".format(self.model_name, epoch, step + 1))
                 
                 if step % self.train_config.logging_steps == 0 or step == train_steps_per_epoch:
                     loss_cpu = loss.detach().item() * self.train_config.gradient_accumulation_steps

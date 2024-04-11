@@ -1,11 +1,11 @@
 import os
 import torch
+import argparse
 import numpy as np
 from torch.utils.data import DataLoader
 from rich.progress import (
     Progress, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 )
-from transformers.generation.configuration_utils import GenerationConfig
 
 from components import LlamaForCausalLM, config_class, Trainer, TrainerCallback, Dataset, DatasetForCausalLMPretrain
 from utils.metrics import get_bleu4_score
@@ -13,14 +13,37 @@ from transformers import (
     Adafactor,
     AutoTokenizer
 )
-from torch.nn import functional as F
-from components.datasets.datasets import DatasetForCausalLMPretrain
-from components.datasets.data_reader import PureTextDataReader
 
 CURRENT_PATH = os.path.dirname(os.path.abspath(__file__))
 WORKING_DIR_NAME = "train_dir"
 WORKING_PATH = os.path.join(CURRENT_PATH, WORKING_DIR_NAME)
 DATA_PATH = os.path.join(WORKING_PATH, "data")
+
+parser = argparse.ArgumentParser(description='Argument Parser for Training Script')
+
+# 添加参数
+parser.add_argument('--resume', type=lambda x: x.lower() in ('true', '1', 't', 'y', 'yes'), default=False, help='Resume training flag')
+parser.add_argument('--model_name', type=str, default='model', help='Model name')
+parser.add_argument('--device', type=str, default='cpu', help='Device (cpu or cuda)')
+parser.add_argument('--saving_steps', type=int, default=1000, help='Saving steps during training')
+parser.add_argument('--logging_steps', type=int, default=50, help='Logging steps during training')
+parser.add_argument('--train_dataset_path', type=str, default=None, help='Path to training dataset')
+parser.add_argument('--valid_dataset_path', type=str, default=None, help='Path to validation dataset')
+parser.add_argument('--batch_size_per_gpu', type=int, default=8, help='Batch size per GPU')
+parser.add_argument('--learning_rate', type=float, default=5e-4, help='Learning rate')
+parser.add_argument('--gradient_accumulation_steps', type=int, default=4, help='Gradient accumulation steps')
+parser.add_argument('--num_train_epoches', type=int, default=1, help='Number of training epochs')
+parser.add_argument('--mixed_precision', type=str, default="fp16", help="Mixed precision for GPU")
+parser.add_argument('--keep_latest_n_checkpoints', type=int, default=3, help="When saving models, keep latest checkpoints for reducing waste of disk")
+parser.add_argument('--weight_decay', type=float, default=0.0, help="Weight decay of optimizer")
+parser.add_argument('--seed', type=int, default=42, help="seed of random data")
+parser.add_argument('--adam_epsilon', type=float, default=1e-8, help="adam epsilon")
+parser.add_argument('--warmup_steps', type=int, default=0, help="warmup steps")
+parser.add_argument('--max_grad_norm', type=float, default=1.0, help="max grad norm")
+parser.add_argument('--div_factor', type=int, default=int, help="div factor")
+
+# 解析参数
+args = parser.parse_args()
 
 # -----------------------------定义配置-------------------------
 # 通用配置
@@ -29,28 +52,29 @@ class CommonConfig:
     def __init__(self) -> None:
         self.tokenizer_dir = os.path.join(WORKING_PATH, "tokenizer")
         self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_dir)
+        self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
 # 训练配置
 @config_class(WORKING_PATH)
 class TrainConfig(CommonConfig):
     def __init__(self) -> None:
         super().__init__()
-        self.saving_steps = 5000
-        self.keep_latest_n_checkpoints = 3
-        self.batch_size_per_gpu = 1
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.gradient_accumulation_steps = 2
-        self.num_train_epoches = 1
-        self.weight_decay = 0.0
-        self.learning_rate = 5e-4
-        self.adam_epsilon = 1e-8
-        self.warmup_steps = 0
-        self.max_grad_norm = 1.0
-        self.logging_steps = 50
-        self.div_factor = 50
+        self.saving_steps = args.saving_steps
+        self.keep_latest_n_checkpoints = args.keep_latest_n_checkpoints
+        self.batch_size_per_gpu = args.batch_size_per_gpu
+        self.device = args.device
+        self.gradient_accumulation_steps = args.gradient_accumulation_steps
+        self.num_train_epoches = args.num_train_epoches
+        self.weight_decay = args.weight_decay
+        self.learning_rate = args.learning_rate
+        self.adam_epsilon = args.adam_epsilon
+        self.warmup_steps = args.warmup_steps
+        self.max_grad_norm = args.max_grad_norm
+        self.logging_steps = args.logging_steps
+        self.div_factor = args.div_factor
         self.output_dir = WORKING_PATH
-        self.seed = 42
-        self.mixed_precision = "no"
+        self.seed = args.seed
+        self.mixed_precision = args.mixed_precision
         self.model_file = ""
         self.model_save_path = os.path.join(WORKING_PATH, "model_save")
         self.train_state_dir = os.path.join(WORKING_PATH, "training_state")
@@ -61,12 +85,12 @@ class LlamaConfig(CommonConfig):
     def __init__(self) -> None:
         super().__init__()
         # -----------model_parameters---------------------
-        self.padding_idx = 0
+        self.padding_idx = self.tokenizer.pad_token_id
         self.hidden_size = 512
-        self.vocab_size = 32000
+        self.vocab_size = self.tokenizer.vocab_size
         self.num_hidden_layers = 4
         self.rms_norm_eps = 1e-05
-        self.device = torch.device("cpu")
+        self.device = args.device
         # -----------embedding_parameters-----------------
         self.max_position_embeddings = 2048
         self.rope_theta = 10000
@@ -90,16 +114,16 @@ class DataConfig(CommonConfig):
         super().__init__()
         # 按照block_size截断句子，如果短于min_sentence_length就
         self.min_sentence_length = 5
-        self.block_size = 2048
-        self.max_seq_len = 2048
+        self.block_size = 4
+        self.max_seq_len = 4
 
 # -----------------------------初始化配置-----------------------
 train_config = TrainConfig()
 model_config = LlamaConfig()
 data_config = DataConfig()
 # -----------------------------数据处理-------------------------
-train_dataset = Dataset.load(os.path.join(DATA_PATH, "train_data.bin"))
-valid_dataset = Dataset.load(os.path.join(DATA_PATH, "valid_data.bin"))
+train_dataset = Dataset.load(args.train_dataset_path)
+valid_dataset = Dataset.load(args.valid_dataset_path)
 # -----------------------------dataloader声明--------------------
 train_dataloader = DataLoader(
     dataset=train_dataset,
@@ -225,6 +249,7 @@ class CustomTrainerCallback(TrainerCallback):
 # -----------------------------声明训练器------------------------------
 # 屏蔽accelerate细节
 trainer = Trainer(
+    model_name=args.model_name,
     train_config=train_config,
     model=model,
     tokenizer=train_config.tokenizer,
@@ -236,4 +261,4 @@ trainer = Trainer(
     trainer_callback_class=CustomTrainerCallback
 )
 # -----------------------------开始训练-------------------------------
-trainer.train(resume=False)
+trainer.train(resume=args.resume)
