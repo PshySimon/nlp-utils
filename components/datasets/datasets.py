@@ -47,17 +47,12 @@ class Dataset(TorchDataset):
     def save(self, path):
         with open(path, 'wb') as f:
             pickle.dump(self, f)
-        print("Dataset saved in file {} successfully".format(path))
     
     @staticmethod
     def load(path):
-        print("begin to read dataset from binary file")
-        start_time = time()
         dataset_instance = None
         with open(path, 'rb') as f:
             dataset_instance = pickle.load(f)
-        cost_time = time() - start_time
-        print("load dataset from binary file successfully, cost time {:.2f} s".format(cost_time))
         return dataset_instance
 
 
