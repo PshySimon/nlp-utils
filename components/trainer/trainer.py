@@ -22,6 +22,7 @@ class Trainer:
     def __init__(self,
                  model_name,
                  train_config,
+                 train_dataset_path,
                  tokenizer,
                  model,
                  dataset,
@@ -32,6 +33,7 @@ class Trainer:
                  trainer_callback_class) -> None:
         self.model_name = model_name
         self.train_config = train_config
+        self.train_dataset_path = train_dataset_path
         self.tokenizer = tokenizer
         self.model = model
         self.tokenizer = train_config.tokenizer
@@ -48,11 +50,16 @@ class Trainer:
         logger_filename = "chat-trainer-{}".format(current_datetime)
         self.formatted_datetime = current_datetime.strftime("%Y%m%d%H%M%S")
         self.logger = Logger('chat_trainer', std_out=True, project_dir=project_dir,
-                             save2file=True, file_name=logger_filename)
+                             save2file=True, file_name=None)
+        self.calc_parameters_num()
 
         self.latest_checkpoints = deque()
         signal.signal(signal.SIGINT, self.process_exit_handler)
         set_seed(train_config.seed)
+
+    def calc_parameters_num(self):
+        total = sum([param.nelement() for param in self.model.parameters()])
+        print('Number of parameter: % .2fB' % (total / 1e9))
 
     def process_exit_handler(self, signal_received, frame):
         if not os.path.exists(self.train_config.train_state_dir):
@@ -118,8 +125,8 @@ class Trainer:
         self.log("using device {}, device num is {}".format(str(device), self.accelerator.num_processes), save_to_file=True)
         train_steps_per_epoch = int(np.ceil(len(self.train_dataset) // self.get_total_batch_size()))
 
-        self.log('train dataset size: {}, steps per epoch:{}'                                       \
-            .format(len(self.train_dataset), train_steps_per_epoch), save_to_file=True)
+        self.log('train dataset name:{} size: {}, steps per epoch:{}'                                       \
+            .format(self.train_dataset_path, len(self.train_dataset), train_steps_per_epoch), save_to_file=True)
         self.model, self.optimizer, self.scheduler, self.train_dataloader, self.valid_dataloader =   \
             self.accelerator.prepare(
                 self.model, 
@@ -194,7 +201,9 @@ class Trainer:
             # ------------------------------epoch_train_end-------------------------------
             self.trainer_callback.on_epoch_train_end()
             # ----------------------------------------------------------------------------
-
+            self.accelerator.save_state(
+                output_dir=self.train_config.train_state_dir,
+                safe_serialization=False)
             # ------------------------------epoch_evaluate_begin--------------------------
             self.trainer_callback.on_epoch_evaluate_begin()
             # ----------------------------------------------------------------------------

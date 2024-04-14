@@ -33,14 +33,14 @@ parser.add_argument('--batch_size_per_gpu', type=int, default=8, help='Batch siz
 parser.add_argument('--learning_rate', type=float, default=5e-4, help='Learning rate')
 parser.add_argument('--gradient_accumulation_steps', type=int, default=4, help='Gradient accumulation steps')
 parser.add_argument('--num_train_epoches', type=int, default=1, help='Number of training epochs')
-parser.add_argument('--mixed_precision', type=str, default="fp16", help="Mixed precision for GPU")
+parser.add_argument('--mixed_precision', type=str, default="no", help="Mixed precision for GPU")
 parser.add_argument('--keep_latest_n_checkpoints', type=int, default=3, help="When saving models, keep latest checkpoints for reducing waste of disk")
 parser.add_argument('--weight_decay', type=float, default=0.0, help="Weight decay of optimizer")
 parser.add_argument('--seed', type=int, default=42, help="seed of random data")
 parser.add_argument('--adam_epsilon', type=float, default=1e-8, help="adam epsilon")
 parser.add_argument('--warmup_steps', type=int, default=0, help="warmup steps")
 parser.add_argument('--max_grad_norm', type=float, default=1.0, help="max grad norm")
-parser.add_argument('--div_factor', type=int, default=int, help="div factor")
+parser.add_argument('--div_factor', type=int, default=50, help="div factor")
 
 # 解析参数
 args = parser.parse_args()
@@ -53,6 +53,9 @@ class CommonConfig:
         self.tokenizer_dir = os.path.join(WORKING_PATH, "tokenizer")
         self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_dir)
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        self.max_length = 1024
+        self.vocab_size = self.tokenizer.vocab_size
+
 
 # 训练配置
 @config_class(WORKING_PATH)
@@ -88,7 +91,7 @@ class LlamaConfig(CommonConfig):
         self.padding_idx = self.tokenizer.pad_token_id
         self.hidden_size = 512
         self.vocab_size = self.tokenizer.vocab_size
-        self.num_hidden_layers = 4
+        self.num_hidden_layers = 16
         self.rms_norm_eps = 1e-05
         self.device = args.device
         # -----------embedding_parameters-----------------
@@ -100,12 +103,18 @@ class LlamaConfig(CommonConfig):
         self.attention_dropout = 0.0
         self.num_key_value_heads = 4
         # -----------mlp_parameters-----------------------
-        self.intermidiate_size = 1024
+        self.intermidiate_size = 2048
         # -----------generation_parameters----------------
         self.eos_token_id = self.padding_idx
         self.pad_token_id = self.padding_idx
-        self.max_generate_len = 2048
-        self.generation_algorithm = "greedy_search"
+        self.eos_token_ids = [self.pad_token_id, self.eos_token_id]
+        self.temperature = 0.98
+        self.top_k = 50
+        self.top_p = 0.80
+        self.repetition_penalty = 1.1
+        self.length_penalty = -2.0
+        self.num_beams = 5
+        self.do_sample = True
 
 # 数据配置
 @config_class(WORKING_PATH)
@@ -114,7 +123,7 @@ class DataConfig(CommonConfig):
         super().__init__()
         # 按照block_size截断句子，如果短于min_sentence_length就
         self.min_sentence_length = 5
-        self.block_size = 4
+        self.block_size = 1024
         self.max_seq_len = 4
 
 # -----------------------------初始化配置-----------------------
@@ -192,7 +201,7 @@ class CustomTrainerCallback(TrainerCallback):
         return
     
     def train_batch(self, step, batch_data):
-        loss, _ = model(**batch_data)
+        logits, loss = model(**batch_data)
         return loss
 
     def on_save_model(self):
@@ -212,18 +221,20 @@ class CustomTrainerCallback(TrainerCallback):
         return
 
     def evaluate(self, step, batch_data):
-        input_ids = batch_data["input_ids"]
-        labels = batch_data["labels"]
-        preds = self.trainer.model.generate(input_ids)
-        preds = self.trainer.accelerator.gather_for_metrics(preds)\
-                                        .detach().cpu().numpy()
-        labels = self.trainer.accelerator.gather_for_metrics(labels)\
-                                        .detach().cpu().numpy()
-        preds = self.trainer.tokenizer.batch_decode(preds)
-        labels = self.trainer.tokenizer.batch_decode(labels)
+        return
+        # input_ids = batch_data["input_ids"]
+        # labels = batch_data["labels"]
+        # batch_size, cur_len = input_ids.size()
+        # preds = self.trainer.model.generate(input_ids, cur_len, batch_size)
+        # preds = self.trainer.accelerator.gather_for_metrics(preds)\
+        #                                 .detach().cpu().numpy()
+        # labels = self.trainer.accelerator.gather_for_metrics(labels)\
+        #                                 .detach().cpu().numpy()
+        # preds = self.trainer.tokenizer.batch_decode(preds)
+        # labels = self.trainer.tokenizer.batch_decode(labels)
 
-        bleu_scores = [get_bleu4_score(reference, output) for reference, output in zip(labels, preds)]
-        return bleu_scores
+        # bleu_scores = [get_bleu4_score(reference, output) for reference, output in zip(labels, preds)]
+        # return bleu_scores
     
     def calculate_score(self, criterion_scores):
         if len(criterion_scores) == 0:
@@ -251,6 +262,7 @@ class CustomTrainerCallback(TrainerCallback):
 trainer = Trainer(
     model_name=args.model_name,
     train_config=train_config,
+    train_dataset_path = args.train_dataset_path,
     model=model,
     tokenizer=train_config.tokenizer,
     dataset=(train_dataset, valid_dataset),

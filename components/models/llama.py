@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+from .base_model import BaseModel
 
 
 class LlamaConfig:
@@ -418,9 +419,9 @@ class LlamaModel(nn.Module):
         return hidden_states, all_attentions, next_kv_states_list
 
 
-class LlamaForCausalLM(nn.Module):
+class LlamaForCausalLM(BaseModel):
     def __init__(self, config):
-        super().__init__()
+        super().__init__(config)
         self.model = LlamaModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
@@ -451,77 +452,17 @@ class LlamaForCausalLM(nn.Module):
 
         loss = None
         if labels is not None:
+            labels = labels.type(torch.LongTensor)
             # Shift so that tokens < n predict n 
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
             loss_fct = nn.CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_logits = shift_logits.view(-1, self.vocab_size)
             shift_labels = shift_labels.view(-1)
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
 
         return logits, loss
-    
-    @torch.inference_mode()
-    def generate(
-        self,
-        config,
-        input_ids,
-        attention_mask
-    ):
-        stop_generation = True
-        # 1.生成文本所需配置
-        device = config.device
-        input_ids = input_ids.to(device)
-        eos_token_id = config.eos_token_id
-        pad_token_id = config.pad_token_id
-        max_generate_len = config.max_generate_len
-        generation_algorithm = config.generation_algorithm
-        if isinstance(eos_token_id, int):
-            eos_token_id = [eos_token_id]
-        eos_token_id_tensor = torch.tensor(eos_token_id).to(input_ids.device)
-        unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
-        
-        while stop_generation:
-            # 2.处理输入数据
-            outputs = self(input_ids=input_ids, attention_mask=attention_mask, use_cache=True)
-            # 3.获取logits
-            next_token_logits = outputs[0][:, -1, :]
-            # 4.执行某种算法获取next_token
-            next_tokens = torch.argmax(next_token_logits, dim=-1)
-            next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
-            # 5.更新input_ids、attention_mask等参数
-            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
-            attention_mask = torch.cat(
-                [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
-            )
-            # 6.处理句子是否stop生成
-            unfinished_sequences = unfinished_sequences.mul(
-                next_tokens.tile(eos_token_id_tensor.shape[0], 1).ne(eos_token_id_tensor.unsqueeze(1)).prod(dim=0)
-            )
-            if unfinished_sequences.max() == 0 or input_ids.shape[-1] >= max_generate_len:
-                stop_generation = False
 
-        return input_ids
-
-
-# torch.set_printoptions(sci_mode=False)
-# from time import time
-# from transformers import AutoTokenizer
-# config = LlamaConfig()
-# tokenizer = AutoTokenizer.from_pretrained("FlagAlpha/Llama2-Chinese-7b-Chat", trust_remote_code=True)
-# tokenizer.pad_token = tokenizer.eos_token
-# config.tokenizer = tokenizer
-# inputs = tokenizer(['hello?you are my everything', "I'd like to do it"], padding=True, return_tensors='pt')
-# print("loading model...")
-# start = time()
-# model = LlamaForCausalLM(config=config)
-# end = time()
-# print("finished loading model, cost {} s".format(end - start))
-# input_ids = model.generate(
-#     input_ids=inputs["input_ids"],
-#     attention_mask=inputs["attention_mask"],
-#     config=config
-# )

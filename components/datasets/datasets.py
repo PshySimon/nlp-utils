@@ -91,7 +91,11 @@ class DatasetForCausalLMPretrain(Dataset):
         return DatasetForCausalLMPretrain(data, config)
 
     def __getitem__(self, index):
-        return {"input_ids": self.data["input_ids"][index].astype(np.int32)}
+        input_ids = self.data["input_ids"][index].astype(np.int32)
+        return {
+            "input_ids": input_ids,
+            "labels": input_ids
+        }
     
     def __len__(self):
         return len(self.data["input_ids"])
